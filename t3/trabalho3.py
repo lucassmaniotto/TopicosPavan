@@ -1,13 +1,14 @@
+import matplotlib.pyplot as plt
 import joblib
 import pandas as pd # Mantido caso precise para outras operações, mas joblib será usado para carregar
 
 
-X_train_scaled = joblib.load('content/X_train_scaled.pkl')
-y_train_scaled = joblib.load('content/y_train_scaled.pkl')
-X_val_scaled = joblib.load('content/X_val_scaled.pkl')
-y_val_scaled = joblib.load('content/y_val_scaled.pkl')
-X_test_scaled = joblib.load('content/X_test_scaled.pkl')
-y_test_scaled = joblib.load('content/y_test_scaled.pkl')
+X_train_scaled = joblib.load('../content/X_train_scaled.pkl')
+y_train_scaled = joblib.load('../content/y_train_scaled.pkl')
+X_val_scaled = joblib.load('../content/X_val_scaled.pkl')
+y_val_scaled = joblib.load('../content/y_val_scaled.pkl')
+X_test_scaled = joblib.load('../content/X_test_scaled.pkl')
+y_test_scaled = joblib.load('../content/y_test_scaled.pkl')
 
 print("Dados carregados com sucesso!")
 print(f"Shape dos dados de treino: X={X_train_scaled.shape}, y={y_train_scaled.shape}")
@@ -25,14 +26,14 @@ model.fit(X_train_scaled, y_train_scaled.iloc[:, 0])
 print("Modelo RandomForestRegressor treinado com sucesso!")
 
 
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from sklearn.metrics import root_mean_squared_error, mean_absolute_error, r2_score
 import numpy as np
 
 # Previsões nos dados de treino
 y_train_pred = model.predict(X_train_scaled)
 
 # Avaliação nos dados de treino (usando apenas a primeira coluna de y_train_scaled)
-rmse_train = np.sqrt(mean_squared_error(y_train_scaled.iloc[:, 0], y_train_pred))
+rmse_train = np.sqrt(root_mean_squared_error(y_train_scaled.iloc[:, 0], y_train_pred))
 mae_train = mean_absolute_error(y_train_scaled.iloc[:, 0], y_train_pred)
 r2_train = r2_score(y_train_scaled.iloc[:, 0], y_train_pred)
 
@@ -45,7 +46,7 @@ print(f"  R²: {r2_train:.4f}")
 y_val_pred = model.predict(X_val_scaled)
 
 # Avaliação nos dados de validação (usando apenas a primeira coluna de y_val_scaled)
-rmse_val = np.sqrt(mean_squared_error(y_val_scaled.iloc[:, 0], y_val_pred))
+rmse_val = np.sqrt(root_mean_squared_error(y_val_scaled.iloc[:, 0], y_val_pred))
 mae_val = mean_absolute_error(y_val_scaled.iloc[:, 0], y_val_pred)
 r2_val = r2_score(y_val_scaled.iloc[:, 0], y_val_pred)
 
@@ -126,42 +127,43 @@ print(f"\nMelhor conjunto de hiperparâmetros encontrado:")
 print(best_params)
 print(f"\nMelhor RMSE de validação (neg_mean_squared_error): {best_score:.4f}")
 
-# Combinação dos arquivos de treino e validação
-X_train_val = pd.concat([X_train_scaled, X_val_scaled])
-y_train_val = pd.concat([y_train_scaled, y_val_scaled])
-
 # Treino do modelo com os melhores hyperparametros com a combinação de dados acima
-best_model = RandomForestRegressor(**best_params, random_state=42)
-best_model.fit(X_train_val, y_train_val.iloc[:, 0])
+best_model = grid_search.best_estimator_
 
-print("RandomForestRegressor treinado com hiperparâmetros otimizados (treino + validação).")
+# Avalia no conjunto de validação
+y_final = best_model.predict(X_val_scaled)
 
-# Predições no test data
-y_test_pred = best_model.predict(X_test_scaled)
+y_pred = np.ravel(y_final)
+y_true = np.ravel(y_val_scaled)
 
-# Avaliação do modelo com o test data
-rmse_test = np.sqrt(mean_squared_error(y_test_scaled.iloc[:, 0], y_test_pred))
-mae_test = mean_absolute_error(y_test_scaled.iloc[:, 0], y_test_pred)
-r2_test = r2_score(y_test_scaled.iloc[:, 0], y_test_pred)
+# align lengths if needed
+if y_pred.shape != y_true.shape:
+    n = min(y_pred.shape[0], y_true.shape[0])
+    y_pred = y_pred[:n]
+    y_true = y_true[:n]
 
-print("\nAvaliação do Conjunto de teste:")
-print(f"  RMSE: {rmse_test:.4f}")
-print(f"  MAE: {mae_test:.4f}")
-print(f"  R²: {r2_test:.4f}")
+residuals = y_pred - y_true
+# scatter plot of residuals (only points, no connecting lines)
+plt.figure(figsize=(8, 4))
+plt.plot(residuals, marker='o', linestyle='None', markersize=3)
+plt.axhline(0, color='red', linewidth=1)
+plt.xlabel('Amostra')
+plt.ylabel('Erro (y_pred - y_true)')
+plt.title('Resíduos: diferença entre predição e valor real')
+plt.grid(True)
+plt.tight_layout()
+plt.show()
 
-# Comparação com o baseline
-print("\nReporte dos resustados finais e comparação com o baseline:")
-print("Métricas de avaliação nos dados de treino (Baseline):")
-print(f"  RMSE: {rmse_train:.4f}")
-print(f"  MAE: {mae_train:.4f}")
-print(f"  R²: {r2_train:.4f}")
+# histogram of residuals
+plt.figure(figsize=(6, 4))
+plt.hist(residuals, bins=30)
+plt.xlabel('Erro (y_pred - y_true)')
+plt.title('Histograma dos resíduos')
+plt.grid(True)
+plt.tight_layout()
+plt.show()
 
-print("\nMétricas de avaliação nos dados de validação (Baseline):")
-print(f"  RMSE: {rmse_val:.4f}")
-print(f"  MAE: {mae_val:.4f}")
-print(f"  R²: {r2_val:.4f}")
-
-print("\nMétricas de avaliação nos dados de teste (Otimizado):")
-print(f"  RMSE: {rmse_test:.4f}")
-print(f"  MAE: {mae_test:.4f}")
-print(f"  R²: {r2_test:.4f}")
+# basic metrics
+print(f"MAE: {mean_absolute_error(y_true, y_pred):.4f}")
+print(f"RMSE: {root_mean_squared_error(y_true, y_pred):.4f}")
+print(f"R2: {r2_score(y_true, y_pred):.4f}")
