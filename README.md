@@ -14,7 +14,7 @@ python -m venv ml_env
 
 ### Ativar o ambiente virtual
 ```bash
-ml_env\Scripts\activate
+ml_env\Scripts\Activate.ps1
 ```
 
 ### Atualizar o pip
@@ -40,6 +40,8 @@ notepad trabalho3.py
 ```bash
 python trabalho3.py
 ```
+
+-------------------------------------------------------------------------------------------
 
 ## Instruções para configurar o ambiente de desenvolvimento para Linux/Mac
 ```bash
