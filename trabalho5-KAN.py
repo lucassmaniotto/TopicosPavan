@@ -43,6 +43,17 @@ def load_data():
     y_test = np.ravel(y_test).astype(np.float32)
     y_val = np.ravel(y_val).astype(np.float32)
 
+    # alinhar comprimentos X/y por split
+    n_tr = min(len(X_train), len(y_train))
+    X_train = X_train[:n_tr]
+    y_train = y_train[:n_tr]
+    n_te = min(len(X_test), len(y_test))
+    X_test = X_test[:n_te]
+    y_test = y_test[:n_te]
+    n_va = min(len(X_val), len(y_val))
+    X_val = X_val[:n_va]
+    y_val = y_val[:n_va]
+
     return X_train, y_train, X_test, y_test, X_val, y_val
 
 
