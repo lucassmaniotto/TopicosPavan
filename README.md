@@ -26,6 +26,7 @@ python -m pip install --upgrade pip
 ```bash
 pip install scikit-learn pandas numpy ipython
 pip install matplotlib seaborn
+pip install torch pykan optuna
 ```
 
 ### Criar o arquivo Python
