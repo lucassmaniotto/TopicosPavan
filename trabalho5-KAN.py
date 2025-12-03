@@ -1,3 +1,14 @@
+"""
+Script de comparação de modelos de regressão (KAN, MLP e Random Forest).
+
+Fluxo geral:
+- Carrega dados pré-processados (train/val/test) do diretório `content`.
+- Usa Optuna para ajustar hiperparâmetros do KAN com early stopping simples.
+- Treina o KAN final com os melhores hiperparâmetros.
+- Treina baselines (MLP e RandomForest) para comparação.
+- Reporta métricas e mostra gráficos de resíduos e de dispersão y_true vs y_pred.
+"""
+
 from pathlib import Path
 import joblib
 import numpy as np
@@ -18,6 +29,7 @@ import optuna
 
 
 def load_data():
+    """Carrega e alinha os conjuntos de dados (train/val/test) em float32."""
     base = Path(__file__).resolve().parent / "content"
     if not base.exists():
         base = Path(__file__).resolve().parents[1] / "content"
@@ -38,12 +50,12 @@ def load_data():
     X_val = np.asarray(joblib.load(files["X_val"]), dtype=np.float32)
     y_val = np.asarray(joblib.load(files["y_val"]), dtype=np.float32)
 
-    # garante dimensão correta (ravel para alvo)
+    # Garante dimensão correta do alvo (vetor 1D)
     y_train = np.ravel(y_train).astype(np.float32)
     y_test = np.ravel(y_test).astype(np.float32)
     y_val = np.ravel(y_val).astype(np.float32)
 
-    # alinhar comprimentos X/y por split
+    # Alinha comprimentos X/y por split (evita mismatch)
     n_tr = min(len(X_train), len(y_train))
     X_train = X_train[:n_tr]
     y_train = y_train[:n_tr]
@@ -58,6 +70,7 @@ def load_data():
 
 
 def build_kan(width, grid, k, device):
+    """Cria o modelo KAN com largura, grade e k especificados."""
     return KAN(
         width=width,
         grid=grid,
@@ -68,7 +81,12 @@ def build_kan(width, grid, k, device):
 
 
 def kan_objective(trial, X_train, y_train, X_val, y_val, X_test, y_test, input_dim, output_dim, steps_base=50):
-    # busca sugerida
+    """Objetivo do Optuna: treina o KAN em blocos e avalia por RMSE de validação.
+
+    Usa early stopping simples (paciência fixa) para interromper se não houver melhora.
+    Retorna o negativo do RMSE (maior é melhor para o Optuna).
+    """
+    # Espaço de busca dos hiperparâmetros
     n_hidden_layers = trial.suggest_int("n_hidden_layers", 1, 4)
     hidden_units = trial.suggest_int("hidden_units", max(1, input_dim), 32)
     grid_size = trial.suggest_int("grid_size", 5, 20)
@@ -77,13 +95,13 @@ def kan_objective(trial, X_train, y_train, X_val, y_val, X_test, y_test, input_d
     optimizer = trial.suggest_categorical("optimizer", ["Adam", "Nadam", "LBFGS"])
     l2_reg = trial.suggest_float("l2", 1e-6, 1e-2, log=True)
 
-    # define largura conforme exemplo: [in, hidden..., out]
+    # Define largura conforme exemplo: [in, hidden..., out]
     width = [input_dim] + [hidden_units] * n_hidden_layers + [output_dim]
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = build_kan(width=width, grid=grid_size, k=k_spline, device=device)
 
-    # prepara dataset para KAN
+    # Prepara tensores do dataset para o KAN (em device ativo)
     dataset = {
         "train_input": torch.tensor(X_train, dtype=torch.float32, device=device),
         "train_output": torch.tensor(y_train[:, None], dtype=torch.float32, device=device),
@@ -96,16 +114,16 @@ def kan_objective(trial, X_train, y_train, X_val, y_val, X_test, y_test, input_d
         "test_label": torch.tensor(y_test[:, None], dtype=torch.float32, device=device),
     }
 
-    # early stopping rudimentar: treina em blocos e monitora perda de validação via r2/mae
+    # Early stopping simples: treina em blocos e monitora RMSE de validação
     best_val = None
     best_steps = 0
     total_steps = steps_base
     patience = 3
     remain = patience
 
-    # KAN.fit aceita steps, opt, lamb (L2), lr (learning rate)
-    # Treinamos em "chunks" para poder fazer early stop simples
-    chunk = 50
+    # KAN.fit aceita: steps (épocas), opt (otimizador), lamb (L2), lr (taxa de aprendizado)
+    # Treinamos em blocos menores (chunks) para verificar melhoria e parar cedo
+    chunk = 10
     steps_done = 0
     while steps_done < total_steps:
         steps_now = min(chunk, total_steps - steps_done)
@@ -115,10 +133,10 @@ def kan_objective(trial, X_train, y_train, X_val, y_val, X_test, y_test, input_d
             trial.set_user_attr("kan_error", str(exc))
             return -1e9
 
-        # avaliação rápida na validação
+        # Avaliação rápida na validação
         with torch.no_grad():
             y_hat = model(dataset["val_input"]).detach().cpu().numpy().squeeze()
-        # alinhar comprimentos se necessário e usar -RMSE como métrica
+        # Alinha comprimentos se necessário e usa -RMSE como métrica para o Optuna
         n = min(len(y_val), len(y_hat))
         rmse = root_mean_squared_error(y_val[:n], y_hat[:n])
         val_score = -rmse
@@ -133,14 +151,15 @@ def kan_objective(trial, X_train, y_train, X_val, y_val, X_test, y_test, input_d
                 break
         steps_done += steps_now
 
-    # retorna melhor valor alcançado
+    # Retorna melhor valor alcançado (ou penalização em caso de falha)
     return best_val if best_val is not None else -1e9
 
 
 def evaluate_regression(y_true, y_pred):
+    """Calcula métricas MAE, RMSE e R2 e retorna também resíduos e vetores."""
     y_true = np.ravel(y_true)
     y_pred = np.ravel(y_pred)
-    # alinhar tamanhos se necessário
+    # Alinha tamanhos se necessário
     n = min(y_true.shape[0], y_pred.shape[0])
     y_true = y_true[:n]
     y_pred = y_pred[:n]
@@ -155,6 +174,7 @@ def evaluate_regression(y_true, y_pred):
 
 
 def plot_residuals(residuals, title_prefix=""):
+    """Plota série de resíduos e histograma para rápida inspeção."""
     plt.figure(figsize=(8, 4))
     plt.plot(residuals, marker="o", linestyle="None", markersize=3)
     plt.axhline(0, color="red", linewidth=1)
@@ -180,7 +200,7 @@ def main():
     input_dim = X_train.shape[1]
     output_dim = 1
 
-    # Optuna para KAN
+    # Ajuste de hiperparâmetros (Optuna) para o KAN
     study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=42))
     study.optimize(
         lambda t: kan_objective(
@@ -193,9 +213,12 @@ def main():
             y_test,
             input_dim,
             output_dim,
-            steps_base=50,  # mesmo número de épocas que MLP (ajustável)
+            # Passos base menores aceleram os trials; early stop ajuda a parar cedo
+            steps_base=30,
         ),
         n_trials=10,
+        # Executa trials em paralelo para acelerar a busca
+        n_jobs=4
     )
 
     print("Best KAN trial:")
@@ -218,8 +241,8 @@ def main():
         "test_output": torch.tensor(y_test[:, None], dtype=torch.float32, device=device),
         "test_label": torch.tensor(y_test[:, None], dtype=torch.float32, device=device),
     }
-    # treinamento final com steps=50 e early stop simples já embutido no tuning; aqui treinamos direto
-    kan_model.fit(dataset, opt=bp["optimizer"], steps=50, lamb=bp["l2"], lr=bp["learning_rate"])
+    # Treinamento final com menos passos para terminar mais rápido (ajustável)
+    kan_model.fit(dataset, opt=bp["optimizer"], steps=30, lamb=bp["l2"], lr=bp["learning_rate"])
     with torch.no_grad():
         y_val_pred_kan = kan_model(torch.tensor(X_val, dtype=torch.float32, device=device)).detach().cpu().numpy().squeeze()
 
@@ -227,8 +250,8 @@ def main():
     print(f"KAN -> MAE: {metrics_kan['MAE']:.4f} | RMSE: {metrics_kan['RMSE']:.4f} | R2: {metrics_kan['R2']:.4f}")
     plot_residuals(metrics_kan["residuals"], title_prefix="KAN:")
 
-    # Baselines: MLP (com Optuna do trabalho4) e RandomForest
-    # MLP (usamos alguns parâmetros padrão aqui para comparação rápida)
+    # Baselines: MLP e RandomForest para comparar desempenho
+    # MLP com parâmetros padrão razoáveis para comparação rápida
     mlp = MLPRegressor(
         hidden_layer_sizes=(max(8, input_dim), max(8, input_dim // 2)),
         activation="relu",
@@ -244,12 +267,13 @@ def main():
     print(f"MLP -> MAE: {metrics_mlp['MAE']:.4f} | RMSE: {metrics_mlp['RMSE']:.4f} | R2: {metrics_mlp['R2']:.4f}")
     plot_residuals(metrics_mlp["residuals"], title_prefix="MLP:")
 
-    # Random Forest
+    # Random Forest (usa todos os núcleos de CPU)
     rf = RandomForestRegressor(
         n_estimators=200,
         max_depth=None,
         random_state=42,
-        n_jobs=1,
+        # use all cores for faster RF training
+        n_jobs=-1,
     )
     rf.fit(X_train, y_train)
     y_val_pred_rf = rf.predict(X_val)
@@ -257,18 +281,32 @@ def main():
     print(f"RF  -> MAE: {metrics_rf['MAE']:.4f} | RMSE: {metrics_rf['RMSE']:.4f} | R2: {metrics_rf['R2']:.4f}")
     plot_residuals(metrics_rf["residuals"], title_prefix="RandomForest:")
 
-    # comparação gráfica simples: curvas de dispersão y_true vs y_pred
+    # Gráfico de dispersão: y_true vs y_pred (cores/markers distintos para evitar sobreposição)
     plt.figure(figsize=(6, 6))
-    plt.scatter(metrics_kan["y_true"], metrics_kan["y_pred"], s=10, label="KAN", alpha=0.7)
-    plt.scatter(metrics_mlp["y_true"], metrics_mlp["y_pred"], s=10, label="MLP", alpha=0.7)
-    plt.scatter(metrics_rf["y_true"], metrics_rf["y_pred"], s=10, label="RF", alpha=0.7)
+    # Distinct colors + markers + edgecolors to improve overlap visibility
+    kan_color, mlp_color, rf_color = "#1f77b4", "#ff7f0e", "#2ca02c"  # blue, orange, green
+    plt.scatter(
+        metrics_kan["y_true"], metrics_kan["y_pred"],
+        s=24, marker="o", label="KAN",
+        alpha=0.7, c=kan_color, edgecolors="k", linewidths=0.3, zorder=3,
+    )
+    plt.scatter(
+        metrics_mlp["y_true"], metrics_mlp["y_pred"],
+        s=24, marker="s", label="MLP",
+        alpha=0.7, c=mlp_color, edgecolors="k", linewidths=0.3, zorder=2,
+    )
+    plt.scatter(
+        metrics_rf["y_true"], metrics_rf["y_pred"],
+        s=24, marker="^", label="RF",
+        alpha=0.7, c=rf_color, edgecolors="k", linewidths=0.3, zorder=1,
+    )
     min_y = min(metrics_kan["y_true"].min(), metrics_mlp["y_true"].min(), metrics_rf["y_true"].min())
     max_y = max(metrics_kan["y_true"].max(), metrics_mlp["y_true"].max(), metrics_rf["y_true"].max())
-    plt.plot([min_y, max_y], [min_y, max_y], "r--", label="Ideal")
+    plt.plot([min_y, max_y], [min_y, max_y], color="#666666", linestyle="--", label="Ideal", zorder=0)
     plt.xlabel("y_true")
     plt.ylabel("y_pred")
     plt.title("Comparação: y_true vs y_pred (Validação)")
-    plt.legend()
+    plt.legend(frameon=True)
     plt.grid(True)
     plt.tight_layout()
     plt.show()
