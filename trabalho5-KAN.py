@@ -83,17 +83,19 @@ def build_kan(width, grid, k, device):
 def kan_objective(trial, X_train, y_train, X_val, y_val, X_test, y_test, input_dim, output_dim, steps_base=50):
     """Objetivo do Optuna: treina o KAN em blocos e avalia por RMSE de validação.
 
-    Usa early stopping simples (paciência fixa) para interromper se não houver melhora.
+    Usa early stopping com monitoramento contínuo para interromper se não houver melhora.
     Retorna o negativo do RMSE (maior é melhor para o Optuna).
+    
+    Versão RÁPIDA (otimizada para seu hardware): ~45min - 1h total
     """
-    # Espaço de busca dos hiperparâmetros
-    n_hidden_layers = trial.suggest_int("n_hidden_layers", 1, 4)
-    hidden_units = trial.suggest_int("hidden_units", max(1, input_dim), 32)
-    grid_size = trial.suggest_int("grid_size", 5, 20)
+    # Espaço de busca dos hiperparâmetros - REDUZIDO PARA VELOCIDADE
+    n_hidden_layers = trial.suggest_int("n_hidden_layers", 1, 3)
+    hidden_units = trial.suggest_int("hidden_units", max(input_dim, 16), 64)
+    grid_size = trial.suggest_int("grid_size", 8, 15)
     k_spline = trial.suggest_categorical("k", [2, 3])
     learning_rate = trial.suggest_float("learning_rate", 1e-5, 1e-2, log=True)
-    optimizer = trial.suggest_categorical("optimizer", ["Adam", "Nadam", "LBFGS"])
-    l2_reg = trial.suggest_float("l2", 1e-6, 1e-2, log=True)
+    optimizer = trial.suggest_categorical("optimizer", ["Adam", "Nadam"])
+    l2_reg = trial.suggest_float("l2", 1e-6, 1e-3, log=True)
 
     # Define largura conforme exemplo: [in, hidden..., out]
     width = [input_dim] + [hidden_units] * n_hidden_layers + [output_dim]
@@ -114,17 +116,18 @@ def kan_objective(trial, X_train, y_train, X_val, y_val, X_test, y_test, input_d
         "test_label": torch.tensor(y_test[:, None], dtype=torch.float32, device=device),
     }
 
-    # Early stopping simples: treina em blocos e monitora RMSE de validação
+    # Early stopping com monitoramento contínuo: treina em blocos e monitora RMSE de validação
     best_val = None
     best_steps = 0
     total_steps = steps_base
-    patience = 3
-    remain = patience
+    patience = 3  # Versão rápida - paciência reduzida
+    consecutive_no_improve = 0
 
     # KAN.fit aceita: steps (épocas), opt (otimizador), lamb (L2), lr (taxa de aprendizado)
     # Treinamos em blocos menores (chunks) para verificar melhoria e parar cedo
-    chunk = 10
+    chunk = 10  # Versão rápida - chunks menores
     steps_done = 0
+    
     while steps_done < total_steps:
         steps_now = min(chunk, total_steps - steps_done)
         try:
@@ -133,22 +136,24 @@ def kan_objective(trial, X_train, y_train, X_val, y_val, X_test, y_test, input_d
             trial.set_user_attr("kan_error", str(exc))
             return -1e9
 
-        # Avaliação rápida na validação
+        # Avaliação na validação
         with torch.no_grad():
             y_hat = model(dataset["val_input"]).detach().cpu().numpy().squeeze()
-        # Alinha comprimentos se necessário e usa -RMSE como métrica para o Optuna
+        # Alinha comprimentos se necessário
         n = min(len(y_val), len(y_hat))
         rmse = root_mean_squared_error(y_val[:n], y_hat[:n])
         val_score = -rmse
 
-        if (best_val is None) or (val_score > best_val):
+        # Early stopping baseado em melhoria relativa
+        if (best_val is None) or (val_score > best_val + 1e-4):  # Melhoria mínima de 1e-4
             best_val = val_score
             best_steps = steps_done + steps_now
-            remain = patience
+            consecutive_no_improve = 0
         else:
-            remain -= 1
-            if remain <= 0:
+            consecutive_no_improve += 1
+            if consecutive_no_improve >= patience:
                 break
+        
         steps_done += steps_now
 
     # Retorna melhor valor alcançado (ou penalização em caso de falha)
@@ -200,8 +205,12 @@ def main():
     input_dim = X_train.shape[1]
     output_dim = 1
 
-    # Ajuste de hiperparâmetros (Optuna) para o KAN
-    study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=42))
+    # Ajuste de hiperparâmetros (Optuna) para o KAN com parâmetros aprimorados
+    # VERSÃO RÁPIDA: tempo estimado ~45min - 1h
+    study = optuna.create_study(
+        direction="maximize",
+        sampler=optuna.samplers.TPESampler(seed=42, multivariate=True),
+    )
     study.optimize(
         lambda t: kan_objective(
             t,
@@ -213,12 +222,13 @@ def main():
             y_test,
             input_dim,
             output_dim,
-            # Passos base menores aceleram os trials; early stop ajuda a parar cedo
-            steps_base=30,
+            # VERSÃO RÁPIDA: 50 steps por trial
+            steps_base=50,
         ),
-        n_trials=10,
+        n_trials=15,  # VERSÃO RÁPIDA: apenas 15 trials (metade)
         # Executa trials em paralelo para acelerar a busca
-        n_jobs=4
+        n_jobs=2,
+        show_progress_bar=True,
     )
 
     print("Best KAN trial:")
@@ -241,14 +251,25 @@ def main():
         "test_output": torch.tensor(y_test[:, None], dtype=torch.float32, device=device),
         "test_label": torch.tensor(y_test[:, None], dtype=torch.float32, device=device),
     }
-    # Treinamento final com menos passos para terminar mais rápido (ajustável)
-    kan_model.fit(dataset, opt=bp["optimizer"], steps=30, lamb=bp["l2"], lr=bp["learning_rate"])
+    # Treinamento final com muito mais épocas para convergência melhor
+    # VERSÃO RÁPIDA: 80 steps para convergência adequada
+    print(f"Treinando KAN final com arquitetura {width}...")
+    kan_model.fit(dataset, opt=bp["optimizer"], steps=80, lamb=bp["l2"], lr=bp["learning_rate"])
     with torch.no_grad():
         y_val_pred_kan = kan_model(torch.tensor(X_val, dtype=torch.float32, device=device)).detach().cpu().numpy().squeeze()
 
     metrics_kan = evaluate_regression(y_val, y_val_pred_kan)
-    print(f"KAN -> MAE: {metrics_kan['MAE']:.4f} | RMSE: {metrics_kan['RMSE']:.4f} | R2: {metrics_kan['R2']:.4f}")
-    plot_residuals(metrics_kan["residuals"], title_prefix="KAN:")
+    print(f"\nKAN (Validação):")
+    print(f"  MAE: {metrics_kan['MAE']:.4f} | RMSE: {metrics_kan['RMSE']:.4f} | R2: {metrics_kan['R2']:.4f}")
+    
+    # Avalia também no conjunto de teste
+    with torch.no_grad():
+        y_test_pred_kan = kan_model(torch.tensor(X_test, dtype=torch.float32, device=device)).detach().cpu().numpy().squeeze()
+    metrics_kan_test = evaluate_regression(y_test, y_test_pred_kan)
+    print(f"KAN (Teste):")
+    print(f"  MAE: {metrics_kan_test['MAE']:.4f} | RMSE: {metrics_kan_test['RMSE']:.4f} | R2: {metrics_kan_test['R2']:.4f}")
+    
+    plot_residuals(metrics_kan["residuals"], title_prefix="KAN (Validação):")
 
     # Baselines: MLP e RandomForest para comparar desempenho
     # MLP com parâmetros padrão razoáveis para comparação rápida
@@ -264,7 +285,10 @@ def main():
     mlp.fit(X_train, y_train)
     y_val_pred_mlp = mlp.predict(X_val)
     metrics_mlp = evaluate_regression(y_val, y_val_pred_mlp)
-    print(f"MLP -> MAE: {metrics_mlp['MAE']:.4f} | RMSE: {metrics_mlp['RMSE']:.4f} | R2: {metrics_mlp['R2']:.4f}")
+    print(f"MLP (Validação) -> MAE: {metrics_mlp['MAE']:.4f} | RMSE: {metrics_mlp['RMSE']:.4f} | R2: {metrics_mlp['R2']:.4f}")
+    y_test_pred_mlp = mlp.predict(X_test)
+    metrics_mlp_test = evaluate_regression(y_test, y_test_pred_mlp)
+    print(f"MLP (Teste) -> MAE: {metrics_mlp_test['MAE']:.4f} | RMSE: {metrics_mlp_test['RMSE']:.4f} | R2: {metrics_mlp_test['R2']:.4f}")
     plot_residuals(metrics_mlp["residuals"], title_prefix="MLP:")
 
     # Random Forest (usa todos os núcleos de CPU)
@@ -278,7 +302,10 @@ def main():
     rf.fit(X_train, y_train)
     y_val_pred_rf = rf.predict(X_val)
     metrics_rf = evaluate_regression(y_val, y_val_pred_rf)
-    print(f"RF  -> MAE: {metrics_rf['MAE']:.4f} | RMSE: {metrics_rf['RMSE']:.4f} | R2: {metrics_rf['R2']:.4f}")
+    print(f"RF (Validação) -> MAE: {metrics_rf['MAE']:.4f} | RMSE: {metrics_rf['RMSE']:.4f} | R2: {metrics_rf['R2']:.4f}")
+    y_test_pred_rf = rf.predict(X_test)
+    metrics_rf_test = evaluate_regression(y_test, y_test_pred_rf)
+    print(f"RF (Teste) -> MAE: {metrics_rf_test['MAE']:.4f} | RMSE: {metrics_rf_test['RMSE']:.4f} | R2: {metrics_rf_test['R2']:.4f}")
     plot_residuals(metrics_rf["residuals"], title_prefix="RandomForest:")
 
     # Gráfico de dispersão: y_true vs y_pred (cores/markers distintos para evitar sobreposição)
